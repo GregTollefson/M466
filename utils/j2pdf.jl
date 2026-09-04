@@ -1,7 +1,11 @@
 """
     j2pdf(name)
 
-Combine `name.jl` and `name.out` into `name.pdf`.
+Convert `name.jl` into `name.pdf`.
+
+If `name.out` exists, include it as a "Program Output" section.
+Otherwise, generate a PDF containing only the Julia source code.
+
 The files are assumed to be in the current working directory.
 """
 function j2pdf(name::String)
@@ -10,15 +14,13 @@ function j2pdf(name::String)
     outfile = name * ".out"
     texfile = name * ".tex"
 
-    # Make sure the source files exist
-    isfile(jlfile)  || error("File not found: $jlfile")
-    isfile(outfile) || error("File not found: $outfile")
+    # The Julia source file is required
+    isfile(jlfile) || error("File not found: $jlfile")
 
-    # Read the Julia source and output
-    jltext  = read(jlfile, String)
-    outtext = read(outfile, String)
+    # Read the Julia source
+    jltext = read(jlfile, String)
 
-    # Construct the LaTeX document
+    # Start constructing the LaTeX document
     tex = raw"""
 \documentclass[11pt]{article}
 \usepackage[margin=0.75in]{geometry}
@@ -39,12 +41,24 @@ function j2pdf(name::String)
 \begin{lstlisting}
 """ * jltext * raw"""
 \end{lstlisting}
+"""
+
+    # Add program output only if the .out file exists
+    if isfile(outfile)
+        outtext = read(outfile, String)
+
+        tex *= raw"""
 
 \section*{Program Output}
 
 \begin{lstlisting}
 """ * outtext * raw"""
 \end{lstlisting}
+"""
+    end
+
+    # Finish the LaTeX document
+    tex *= raw"""
 
 \end{document}
 """
