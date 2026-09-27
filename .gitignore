@@ -12,3 +12,9 @@ __pycache__/
 *.aux
 *.log
 *.tex
+
+# Output files required for assignment submissioni 
+*.png
+*.out
+*.pdf
+*.html 
