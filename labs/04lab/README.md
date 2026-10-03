@@ -50,6 +50,11 @@ This generates:
 ```text
 matnorm.pdf
 ```
+The pdf can be viewed on WSL/Linux using `evince`
+
+```
+evince matnorm.pdf
+```
 
 The PDF contains:
 
