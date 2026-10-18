@@ -1,6 +1,6 @@
 using DelimitedFiles, Plots, LinearAlgebra
 
-data=readdlm("DE229EC9.dat")
+data=readdlm("data.dat")
 x=data[:,1]
 y=data[:,2]
 display(scatter(x,y,label="data"))
@@ -12,7 +12,7 @@ cfit=V\y
 yfit=V*cfit
 display(plot!(x,yfit,label="fit"))
 
-ctrue = [2.0, -3.0, 0.5, 2.0]
+ctrue=[-0.55,-0.2,-0.2,0.7]
 
 error = norm(cfit-ctrue)/norm(ctrue)
 
@@ -21,3 +21,5 @@ println("Fit Error = ", error)
 ytrue=V*ctrue
 
 display(plot!(x,ytrue,label="true"))
+
+savefig("graph.pdf")
