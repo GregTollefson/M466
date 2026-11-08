@@ -17,4 +17,9 @@ __pycache__/
 *.png
 *.out
 *.pdf
-*.html 
+*.html
+ 
+# Quarto generated dependencies and caches
+**/*_files/
+**/*_cache/
+**/.quarto/ 
