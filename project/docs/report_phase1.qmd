@@ -1,0 +1,590 @@
+---
+title: "Geometric Multigrid Solution of the Two-Dimensional Poisson Equation"
+subtitle: "M466 Numerical Analysis Project — Phase 1: CPU Reference Implementation"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: false
+  pdf:
+    toc: true
+    number-sections: true
+    geometry:
+      - margin=1in
+    colorlinks: true
+execute:
+  enabled: false
+---
+
+# Introduction
+
+This project investigates the numerical solution of the two-dimensional Poisson equation using a geometric multigrid method. The ultimate objective is to compare a CPU reference implementation with parallel CPU and GPU implementations. Phase 1 establishes the mathematical formulation, constructs a matrix-free finite-difference solver in Julia, and verifies its convergence and numerical correctness.
+
+The principal components of the Phase 1 algorithm are a five-point finite-difference approximation to the Laplacian, red-black Gauss–Seidel relaxation, full-weighting restriction, bilinear prolongation, and a recursive multigrid V-cycle. Numerical experiments examine convergence as the number of unknowns increases and compare the multigrid result with an independently assembled sparse direct solve.
+
+# Mathematical formulation
+
+## Poisson equation and boundary conditions
+
+Let the computational domain be the unit square
+
+$$
+\Omega=(0,1)\times(0,1).
+$$
+
+We seek a scalar function $u:\overline\Omega\to\mathbb R$ satisfying
+
+$$
+-\Delta u(x,y)=f(x,y),\qquad (x,y)\in\Omega,
+$$
+
+with homogeneous Dirichlet boundary conditions
+
+$$
+u(x,y)=0,\qquad (x,y)\in\partial\Omega.
+$$
+
+The Laplacian in two dimensions is
+
+$$
+\Delta u=\frac{\partial^2u}{\partial x^2}+\frac{\partial^2u}{\partial y^2}.
+$$
+
+For the experiments in Phase 1, the source is constant:
+
+$$
+\boxed{f(x,y)=1.}
+$$
+
+Thus the problem is $-\Delta u=1$ in the unit square, with zero solution values along all four sides.
+
+## Physical interpretation
+
+The equation can represent a steady-state temperature distribution in a thin plate with uniform internal heat generation and boundaries maintained at a fixed reference temperature. In a dimensional heat-conduction model, the governing equation would typically be $-k\Delta T=q$, where $k$ is thermal conductivity and $q$ is volumetric heat-generation rate (subject to the model's assumptions). Here these physical constants are not separately modeled: the nondimensionalized or normalized right-hand side is simply $f=1$. The computed $u(x,y)$ is therefore a scalar potential or normalized temperature field, not a temperature prediction in specified physical units.
+
+Because the boundary values are zero and the source is positive, the interior solution is positive. The largest values occur in the interior, reflecting the balance between uniform generation and loss through the boundaries.
+
+# Finite-difference discretization
+
+## Uniform grid
+
+Choose $N$ interior grid points in each coordinate direction. Including the boundary points, there are $N+2$ points per direction, with spacing
+
+$$
+\boxed{h=\frac{1}{N+1}.}
+$$
+
+The grid coordinates are
+
+$$
+x_i=ih,\quad y_j=jh,\qquad i,j=0,1,\ldots,N+1.
+$$
+
+The unknowns $u_{i,j}\approx u(x_i,y_j)$ correspond to $1\le i,j\le N$. Boundary values at indices $0$ and $N+1$ are fixed at zero. There are $N^2$ interior unknowns.
+
+## Derivation of the five-point stencil
+
+For a sufficiently smooth function, the centered second-difference approximation in the $x$ direction is
+
+$$
+\frac{\partial^2u}{\partial x^2}(x_i,y_j)
+=\frac{u_{i-1,j}-2u_{i,j}+u_{i+1,j}}{h^2}+O(h^2).
+$$
+
+Similarly,
+
+$$
+\frac{\partial^2u}{\partial y^2}(x_i,y_j)
+=\frac{u_{i,j-1}-2u_{i,j}+u_{i,j+1}}{h^2}+O(h^2).
+$$
+
+Adding the two approximations and applying the negative sign yields
+
+$$
+\boxed{
+-\Delta u(x_i,y_j)\approx
+\frac{4u_{i,j}-u_{i-1,j}-u_{i+1,j}-u_{i,j-1}-u_{i,j+1}}{h^2}.
+}
+$$
+
+Consequently, at each interior point,
+
+$$
+\boxed{
+4u_{i,j}-u_{i-1,j}-u_{i+1,j}-u_{i,j-1}-u_{i,j+1}=h^2 f_{i,j}.
+}
+$$
+
+The local truncation error of the five-point approximation is $O(h^2)$ for sufficiently smooth solutions. This describes the accuracy of the *discretization*, not the convergence tolerance of the iterative linear solver.
+
+## Linear-system formulation
+
+Collecting all interior unknowns into a vector $\mathbf u\in\mathbb R^{N^2}$ gives
+
+$$
+\boxed{A_h\mathbf u=\mathbf f.}
+$$
+
+Under a column-major ordering of the interior grid, the sparse matrix can be expressed as
+
+$$
+A_h=\frac{1}{h^2}(I_N\otimes T_N+T_N\otimes I_N),
+$$
+
+where $I_N$ is the $N\times N$ identity matrix, $\otimes$ denotes the Kronecker product, and
+
+$$
+T_N=\begin{pmatrix}
+2&-1&&&\\
+-1&2&-1&&\\
+&\ddots&\ddots&\ddots&\\
+&&-1&2&-1\\
+&&&-1&2
+\end{pmatrix}.
+$$
+
+Each row of $A_h$ contains a diagonal coefficient $4/h^2$ and up to four neighboring coefficients $-1/h^2$. The boundary values contribute no additional terms here because they are zero.
+
+For the illustrative case $N=3$, there are nine unknowns and $h=1/4$. The stencil applied to an array with only its center entry equal to one produces
+
+$$
+A_hu=\begin{pmatrix}
+0&-16&0\\
+-16&64&-16\\
+0&-16&0
+\end{pmatrix},
+$$
+
+which provides a simple implementation check.
+
+## Matrix-free application in Julia
+
+Although $A_h$ is useful for analysis and direct-solver validation, the multigrid implementation does not explicitly construct it. Instead, it applies the stencil directly to a two-dimensional array. The solution array includes its zero-valued boundary rows and columns, while the right-hand side stores interior values only.
+
+```{.julia}
+function apply_operator(u, h)
+    N = size(u, 1) - 2
+    Au = zeros(Float64, N, N)
+    for j in 2:N+1
+        for i in 2:N+1
+            Au[i-1, j-1] = (
+                4*u[i,j] - u[i-1,j] - u[i+1,j] -
+                u[i,j-1] - u[i,j+1]
+            ) / h^2
+        end
+    end
+    return Au
+end
+```
+
+The matrix-free representation stores $O(N^2)$ grid data rather than a dense $N^2\times N^2$ coefficient matrix, which would require $O(N^4)$ storage. A sparse explicit matrix also has $O(N^2)$ storage, but matrix-free application avoids assembling it.
+
+# Red-black Gauss–Seidel relaxation
+
+## Derivation of the point update
+
+Rearranging the finite-difference equation to isolate $u_{i,j}$ gives
+
+$$
+\boxed{
+u_{i,j}\leftarrow\frac14\left(
+u_{i-1,j}+u_{i+1,j}+u_{i,j-1}+u_{i,j+1}+h^2f_{i,j}\right).
+}
+$$
+
+Gauss–Seidel relaxation updates each unknown using the most recently available neighboring values. This iteration is effective at damping oscillatory, high-frequency error, but can reduce smooth, low-frequency error slowly.
+
+## Two-color ordering
+
+Define the color of a grid point by the parity of $i+j$:
+
+$$
+\text{red if }i+j\text{ is even},\qquad
+\text{black if }i+j\text{ is odd}.
+$$
+
+Every horizontal or vertical neighbor of a red point is black, and vice versa. Therefore, all red points can be updated independently of one another using the current black values. After the red pass, all black points can be updated independently using the newly computed red values.
+
+A complete red-black Gauss–Seidel sweep consists of **one red pass followed by one black pass**. The two passes must remain ordered, but updates within a pass are naturally parallelizable. This is the basis for the planned GPU implementation.
+
+## Julia implementation
+
+```{.julia}
+function redblack_step!(u, f, h)
+    N = size(f, 1)
+    for j in 2:N+1, i in 2:N+1
+        if iseven(i+j)
+            u[i,j] = (
+                u[i-1,j] + u[i+1,j] +
+                u[i,j-1] + u[i,j+1] +
+                h^2*f[i-1,j-1]
+            ) / 4
+        end
+    end
+    for j in 2:N+1, i in 2:N+1
+        if isodd(i+j)
+            u[i,j] = (
+                u[i-1,j] + u[i+1,j] +
+                u[i,j-1] + u[i,j+1] +
+                h^2*f[i-1,j-1]
+            ) / 4
+        end
+    end
+    return u
+end
+```
+
+The exclamation mark in `redblack_step!` follows Julia convention: the function modifies the supplied solution array in place.
+
+# Residual and error equation
+
+Let $\mathbf u^*$ denote the exact solution of the **discrete** system $A_h\mathbf u^*=\mathbf f$, and let $\mathbf u$ be the current iterate. Define the algebraic error
+
+$$
+\mathbf e=\mathbf u^*-\mathbf u
+$$
+
+and the residual
+
+$$
+\boxed{\mathbf r=\mathbf f-A_h\mathbf u.}
+$$
+
+Subtracting $A_h\mathbf u$ from $A_h\mathbf u^*=\mathbf f$ gives
+
+$$
+A_h(\mathbf u^*-\mathbf u)=\mathbf f-A_h\mathbf u,
+$$
+
+hence
+
+$$
+\boxed{A_h\mathbf e=\mathbf r.}
+$$
+
+This identity motivates coarse-grid correction: rather than directly solving the original equation again, multigrid approximates the remaining error by solving an equation driven by the residual.
+
+The stopping criterion used in Phase 1 is the relative residual
+
+$$
+\boxed{\rho=\frac{\|\mathbf f-A_h\mathbf u\|_2}{\|\mathbf f\|_2}<10^{-8}.}
+$$
+
+Since $f=1$ at every interior point, $\|\mathbf f\|_2=N$. A small residual indicates that the discrete equations are nearly satisfied; it is not by itself a direct measurement of error against the continuous PDE solution.
+
+```{.julia}
+using LinearAlgebra
+
+function compute_residual(u, f, h)
+    return f - apply_operator(u, h)
+end
+
+function relative_residual(u, f, h)
+    return norm(compute_residual(u, f, h)) / norm(f)
+end
+```
+
+# Geometric multigrid
+
+## Motivation
+
+Relaxation rapidly eliminates high-frequency error on a fine grid, but the remaining smooth error may require many additional iterations. A smooth error component on a fine grid appears more oscillatory when represented on a coarser grid, where relaxation can treat it efficiently. Multigrid alternates fine-grid smoothing with coarse-grid error correction.
+
+## Nested grid hierarchy
+
+For the unit square, the coarse-grid spacing is $H=2h$. Because
+
+$$
+h=\frac{1}{N_f+1},\qquad H=\frac{1}{N_c+1},
+$$
+
+we obtain
+
+$$
+\frac{1}{N_c+1}=\frac{2}{N_f+1}
+\quad\Longrightarrow\quad
+\boxed{N_c=\frac{N_f-1}{2}.}
+$$
+
+The implementation uses grid sizes
+
+$$
+\boxed{N=2^k-1,}
+$$
+
+so repeated coarsening reaches a single interior unknown. For example,
+
+$$
+255\longrightarrow127\longrightarrow63\longrightarrow31
+\longrightarrow15\longrightarrow7\longrightarrow3\longrightarrow1.
+$$
+
+The finest grid in this example has $255^2=65{,}025$ interior unknowns and spacing $h=1/256$.
+
+## Full-weighting restriction
+
+Restriction transfers a fine-grid residual $r_h$ to a coarse-grid right-hand side $r_H$. At each coarse-grid point, the implementation takes a weighted average of the corresponding fine-grid residual and its eight neighbors:
+
+$$
+\boxed{
+(r_H)_{I,J}=\frac1{16}\left[
+4r_{i,j}
++2(r_{i-1,j}+r_{i+1,j}+r_{i,j-1}+r_{i,j+1})
++r_{i-1,j-1}+r_{i-1,j+1}+r_{i+1,j-1}+r_{i+1,j+1}
+\right],
+}
+$$
+
+where the corresponding fine-grid location is $i=2I$ and $j=2J$ in mathematical indexing (or $i=2I+1$, $j=2J+1$ in the boundary-padded Julia arrays). Residual values outside the interior are padded with zeros in this implementation.
+
+The weights can be visualized as
+
+$$
+\frac1{16}\begin{pmatrix}
+1&2&1\\
+2&4&2\\
+1&2&1
+\end{pmatrix}.
+$$
+
+## Bilinear prolongation
+
+Prolongation transfers the coarse-grid error estimate $e_H$ back to the fine grid. The coarse-grid values are injected at coincident fine-grid points. Missing fine-grid values are interpolated linearly between adjacent coarse points, with cell-center values obtained by averaging the four surrounding coarse points.
+
+In mathematical coordinates, the interpolation rules are
+
+$$
+\begin{aligned}
+(e_h)_{2I,2J}&=(e_H)_{I,J},\\
+(e_h)_{2I+1,2J}&=\tfrac12\big((e_H)_{I,J}+(e_H)_{I+1,J}\big),\\
+(e_h)_{2I,2J+1}&=\tfrac12\big((e_H)_{I,J}+(e_H)_{I,J+1}\big),\\
+(e_h)_{2I+1,2J+1}&=\tfrac14\big((e_H)_{I,J}+(e_H)_{I+1,J}
++(e_H)_{I,J+1}+(e_H)_{I+1,J+1}\big).
+\end{aligned}
+$$
+
+Boundary coarse-grid error values are taken as zero, consistent with the homogeneous Dirichlet boundary conditions. The fine-grid solution is then corrected by
+
+$$
+\boxed{\mathbf u_h\leftarrow\mathbf u_h+P_H^h\mathbf e_H.}
+$$
+
+Here $P_H^h$ denotes the prolongation operator.
+
+## The V-cycle
+
+A V-cycle recursively combines the following operations:
+
+1. Apply $\nu_1$ red-black Gauss–Seidel pre-smoothing sweeps on the current grid.
+2. Compute the fine-grid residual $r_h=f_h-A_hu_h$.
+3. Restrict the residual to the next coarser grid, $r_H=R_h^Hr_h$.
+4. Approximately solve the coarse-grid error equation $A_He_H=r_H$ by a recursive V-cycle, starting from $e_H=0$.
+5. Prolong the error estimate and correct the fine-grid solution, $u_h\leftarrow u_h+P_H^he_H$.
+6. Apply $\nu_2$ red-black Gauss–Seidel post-smoothing sweeps.
+
+Phase 1 uses $\nu_1=\nu_2=2$. At the coarsest level, $N=1$, the discrete equation is $4u/h^2=f$, so it can be solved exactly as
+
+$$
+\boxed{u=\frac{h^2}{4}f.}
+$$
+
+The coarse-grid operator is rediscretized using the same five-point stencil at spacing $H=2h$; the implementation does not explicitly form a Galerkin product $RAP$.
+
+## Recursive Julia implementation
+
+```{.julia}
+function vcycle!(u, f, h; nu1=2, nu2=2)
+    N = size(f, 1)
+
+    if N == 1
+        u[2,2] = (h^2 / 4) * f[1,1]
+        return u
+    end
+
+    @assert N >= 3 && isodd(N)
+
+    for k in 1:nu1
+        redblack_step!(u, f, h)
+    end
+
+    r = compute_residual(u, f, h)
+    rc = restrict_full_weighting(r)
+
+    Nc = size(rc, 1)
+    ec = zeros(Float64, Nc+2, Nc+2)
+    vcycle!(ec, rc, 2*h; nu1=nu1, nu2=nu2)
+
+    ef = prolong_bilinear(ec[2:Nc+1, 2:Nc+1])
+    u[2:N+1, 2:N+1] .+= ef
+
+    for k in 1:nu2
+        redblack_step!(u, f, h)
+    end
+
+    return u
+end
+```
+
+The full implementations of `restrict_full_weighting` and `prolong_bilinear` reside in `multigrid.jl`. The algorithm operates on arrays, and all levels are currently computed on the CPU.
+
+# Implementation and testing
+
+## Julia source organization
+
+The Phase 1 source files are organized as follows:
+
+| File | Responsibility |
+|---|---|
+| `grid.jl` | Initial grid experiments and data layout |
+| `operator.jl` | Matrix-free five-point operator |
+| `redblack.jl` | Red-black relaxation and standalone iteration |
+| `residual.jl` | Residual and relative-residual evaluation |
+| `multigrid.jl` | Restriction, prolongation, and recursive V-cycle |
+| `test_solver.jl` | Automated grid-size convergence tests |
+| `validate_solver.jl` | Comparison with an independent sparse direct solve |
+
+The solution is stored as a $(N+2)\times(N+2)$ `Float64` array including boundary values. The right-hand side and residual are $N\times N$ interior arrays. This representation makes stencil neighbor access straightforward and enforces the zero boundary conditions through unchanged boundary entries.
+
+## Small-grid verification
+
+For $N=3$, the nine-point problem was used to inspect individual red and black passes, residual values, restriction weights, and interpolation values. The exact discrete solution for $f=1$ is
+
+$$
+\mathbf U^*=\begin{pmatrix}
+0.04296875&0.0546875&0.04296875\\
+0.0546875&0.0703125&0.0546875\\
+0.04296875&0.0546875&0.04296875
+\end{pmatrix}.
+$$
+
+A complete V-cycle from zero with two pre-smoothing and two post-smoothing sweeps produced a relative residual of approximately $0.0257799347$. Repeating V-cycles reduced the residual rapidly, reaching $1.5366\times10^{-9}$ after five cycles.
+
+One implementation lesson was that coarse-grid corrections must be computed from the **current** residual. Applying an old correction to a newly converged iterate can increase the residual rather than decrease it.
+
+# Numerical results
+
+## Convergence across grid sizes
+
+All reported tests use $f=1$, homogeneous Dirichlet boundary conditions, two pre-smoothing sweeps, two post-smoothing sweeps, and the stopping tolerance $\rho<10^{-8}$.
+
+| Interior grid $N$ | Unknowns $N^2$ | V-cycles | Final relative residual |
+|---:|---:|---:|---:|
+| 3 | 9 | 5 | $1.5366\times10^{-9}$ |
+| 7 | 49 | 7 | $7.9675\times10^{-10}$ |
+| 15 | 225 | 7 | $2.8416\times10^{-9}$ |
+| 31 | 961 | 7 | $3.7687\times10^{-9}$ |
+| 63 | 3,969 | 7 | $4.0298\times10^{-9}$ |
+| 255 | 65,025 | 7 | $<10^{-8}$ (exact value not recorded) |
+
+For $N=7$ and $N=15$, the observed residual histories were:
+
+| V-cycle | $N=7$ | $N=15$ |
+|---:|---:|---:|
+| 1 | $6.4201\times10^{-2}$ | $7.4635\times10^{-2}$ |
+| 2 | $3.0806\times10^{-3}$ | $4.2362\times10^{-3}$ |
+| 3 | $1.4830\times10^{-4}$ | $2.4529\times10^{-4}$ |
+| 4 | $7.1398\times10^{-6}$ | $1.4286\times10^{-5}$ |
+| 5 | $3.4374\times10^{-7}$ | $8.3355\times10^{-7}$ |
+| 6 | $1.6549\times10^{-8}$ | $4.8664\times10^{-8}$ |
+| 7 | $7.9675\times10^{-10}$ | $2.8416\times10^{-9}$ |
+
+The cycle count remains at seven for all tested grids from $N=7$ through $N=255$, even though the number of unknowns increases from 49 to 65,025. This provides empirical evidence of nearly grid-independent convergence for this problem and parameter choice. It is not a proof of uniform convergence for arbitrary grids or source functions.
+
+## Initial CPU timings
+
+The initial automated test reported:
+
+| $N$ | Unknowns | Measured time (s) |
+|---:|---:|---:|
+| 3 | 9 | 0.000008 |
+| 7 | 49 | 0.000040 |
+| 15 | 225 | 0.000062 |
+| 31 | 961 | 0.000183 |
+| 63 | 3,969 | 0.000439 |
+
+A separate $N=255$ experiment completed seven V-cycles in approximately **0.024 s**. These values are preliminary single-run observations, not a controlled benchmark: compilation effects, timer resolution, allocation behavior, and machine load have not yet been systematically addressed. They should not be used to claim a measured asymptotic runtime or GPU speedup.
+
+For a fixed number of V-cycles, geometric multigrid with efficient per-level operations has an expected work complexity of $O(N^2)$ for an $N\times N$ grid, because the total number of grid points across successively coarsened two-dimensional levels forms a geometric series. Phase 2 will test this scaling with warmed-up, repeated timing measurements.
+
+## Independent direct-solver validation
+
+To check correctness independently, the $N=15$ finite-difference matrix was assembled as a sparse Kronecker sum and solved using Julia's backslash operator. This uses the same discrete mathematical problem but a separate matrix construction and numerical solution method.
+
+```{.julia}
+using LinearAlgebra, SparseArrays
+
+e = ones(N)
+T = spdiagm(-1 => -e[1:end-1],
+            0 => 2*e,
+            1 => -e[1:end-1])
+I_N = sparse(1.0I, N, N)
+A = (kron(I_N, T) + kron(T, I_N)) / h^2
+
+u_direct = A \ vec(f)
+u_mg = vec(u[2:N+1, 2:N+1])
+relative_solution_error = norm(u_mg-u_direct) / norm(u_direct)
+```
+
+The measured results were:
+
+| Quantity | Result |
+|---|---:|
+| Grid size | $N=15$ |
+| Interior unknowns | 225 |
+| Multigrid V-cycles | 7 |
+| Multigrid relative residual | $2.841605\times10^{-9}$ |
+| Direct-solver relative residual | $5.300870\times10^{-15}$ |
+| Relative difference between solutions | $2.327823\times10^{-9}$ |
+
+The relative difference is
+
+$$
+\boxed{
+\frac{\|\mathbf u_{MG}-\mathbf u_{direct}\|_2}
+{\|\mathbf u_{direct}\|_2}
+=2.327823\times10^{-9}.
+}
+$$
+
+The direct solver's residual is smaller because it solves the sparse system to a precision near floating-point roundoff for this problem, whereas the multigrid iteration stops as soon as the residual is below $10^{-8}$. The close agreement provides strong evidence that the multigrid implementation correctly solves the discretized equations.
+
+## Residual, algebraic error, and discretization error
+
+These three quantities must be distinguished:
+
+- **Residual:** $r_h=f_h-A_hu_h$ measures how well the computed iterate satisfies the discrete linear equations.
+- **Algebraic error:** $u_h^*-u_h$ compares the iterate with the exact solution of the discrete equations. The direct-solver comparison estimates this error.
+- **Discretization error:** $u(x_i,y_j)-u_{h,i,j}^*$ compares the continuous PDE solution with the exact discrete solution at grid points.
+
+The five-point stencil has second-order local truncation error under appropriate smoothness assumptions, but the Phase 1 experiments did not compute a continuous exact solution or conduct a grid-refinement study against one. Thus, they validate the **linear solver**, not the absolute accuracy of the PDE approximation.
+
+# Discussion and Phase 1 conclusions
+
+Phase 1 produced a functioning matrix-free geometric multigrid solver for the two-dimensional Poisson equation with uniform forcing and zero Dirichlet boundary values. Red-black Gauss–Seidel smoothing, full-weighting restriction, bilinear prolongation, and a recursive V-cycle were implemented in Julia and verified on small grids.
+
+The key experimental result is that seven V-cycles achieved a relative residual below $10^{-8}$ for every tested grid from $N=7$ through $N=255$. The independent sparse direct solve at $N=15$ agreed with the multigrid solution to a relative difference of approximately $2.33\times10^{-9}$.
+
+The current implementation is intentionally a correctness-oriented CPU reference. It uses `Float64`, allocates temporary arrays during V-cycles, and has not yet undergone rigorous performance benchmarking. These choices make the code easier to inspect and validate but leave opportunities for optimization.
+
+# Next phase: Parallel CPU and GPU computation
+
+Phase 2 will establish reliable CPU performance baselines and explore parallel implementations. Planned investigations include multithreaded red-black relaxation, CUDA kernels for red and black passes, GPU residual evaluation, restriction and prolongation, and a complete GPU V-cycle. Larger nested grids such as $N=1023$, $2047$, and $4095$ will help identify the problem sizes at which GPU execution becomes advantageous.
+
+Comparisons should report the same discretized problem and convergence criterion, include appropriate warm-up and repeated measurements, and distinguish solver execution time from host–device transfer overhead. `Float64` and `Float32` experiments should be reported separately because precision affects both performance and attainable residual tolerance.
+
+# Reproducibility
+
+The Julia implementation is maintained in the `M466/project` directory. The convergence and validation results can be reproduced by running the corresponding scripts from that directory with the repository's Julia environment:
+
+```{.bash}
+julia --project=.. test_solver.jl
+julia --project=.. validate_solver.jl
+```
+
+The report is authored in Quarto Markdown and can be rendered from `M466/project/docs` using:
+
+```{.bash}
+quarto preview report.qmd --to html --no-browser
+quarto render report.qmd --to pdf
+```
