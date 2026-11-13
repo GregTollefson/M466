@@ -3,7 +3,8 @@ using SpecialMatrices, Polynomials, LinearAlgebra
 include("taylor.jl")
 
 # Define the polynomial
-p(x) = x^5 - 9*x^4 - 4*x^3 - 6*x^2 + 4
+# p(x) = x^5 - 9*x^4 - 4*x^3 - 6*x^2 + 4 - test polynomial from the lab notes
+p(x) = x^5 - 3*x^3 - 5*x^2 + 2*x + 4 # lab polynomial from the link in the lab notes 
 
 # Compute polynomial coefficients
 a = taylor(p, 5)
